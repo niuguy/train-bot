@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: train-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: train-bot
+  template:
+    metadata:
+      labels:
+        app: train-bot
+    spec:
+      containers:
+        - name: train-bot
+          image: ghcr.io/niuguy/train-bot:main@sha256:f0193aa228797adb488cd1ffc7d04dafd8bae70018a6a5cf9a491c027a3c2679
+          envFrom:
+            - secretRef:
+                name: train-bot-secret
