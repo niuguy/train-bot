@@ -1,0 +1,24 @@
+# Virtual environments
+.venv/
+
+# Python cache / compiled files
+__pycache__/
+*.py[cod]
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# uv cache directories
+.uv-cache/
+
+# Environment variables / secrets
+.env
+.env.*
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
