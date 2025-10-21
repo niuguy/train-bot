@@ -51,6 +51,33 @@ or, if you have activated the virtual environment manually:
 ```bash
 python -m train_bot
 ```
+
+## Container & Kubernetes Deployment
+
+### Build the Container Image
+1. Authenticate to your registry (e.g. `ghcr.io/niuguy/train-bot`).
+2. Build and push a multi-arch image (replace the tag if you use a different registry):
+   ```bash
+   docker buildx build --platform linux/amd64,linux/arm64 \
+     -t ghcr.io/niuguy/train-bot:latest \
+     --push .
+   ```
+
+### k3s / ArgoCD Manifests
+- `k8s/train-bot/deployment.yaml` defines a single replica worker that pulls the `ghcr.io/niuguy/train-bot:latest` image and injects secrets via `train-bot-secrets`.
+- `k8s/train-bot/secret-example.yaml` shows the expected keys—create the real secret out-of-band:
+  ```bash
+  kubectl create secret generic train-bot-secrets \
+    --from-literal=TELEGRAM_BOT_TOKEN=... \
+    --from-literal=TRANSPORT_API_APP_ID=... \
+    --from-literal=TRANSPORT_API_APP_KEY=...
+  ```
+- `k8s/train-bot/kustomization.yaml` lets ArgoCD sync the deployment directory directly.
+
+Point an ArgoCD Application at `k8s/train-bot` and set the image tag via Kustomize patch or environment-specific overlays if needed.
+
+### GitHub Actions Build (GHCR)
+This repository includes `.github/workflows/publish.yml`, which builds a multi-arch image (`linux/amd64`, `linux/arm64`) and pushes it to `ghcr.io/niuguy/train-bot:latest` on each push to `main` (and on tagged releases). Make sure the repository has GitHub Packages enabled and that the workflow user has permission to push to GHCR (default `GITHUB_TOKEN` works for public repositories).
 The bot will run in polling mode and respond to incoming Telegram messages.
 
 ## Command Reference
