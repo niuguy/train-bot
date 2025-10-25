@@ -1,44 +1,16 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
 import httpx
 
 from .config import TransportApiSettings
+from .models import CallingPoint, Departure, StationSummary
 
 
 class TransportApiError(RuntimeError):
     """Raised when TransportAPI returns an error response."""
-
-
-@dataclass(frozen=True)
-class CallingPoint:
-    station_name: str
-    station_code: str
-    aimed_arrival_time: Optional[str]
-    expected_arrival_time: Optional[str]
-
-
-@dataclass(frozen=True)
-class Departure:
-    service: str
-    destination_name: str
-    destination_code: str
-    platform: Optional[str]
-    aimed_departure_time: str
-    expected_departure_time: str
-    status: str
-    calling_points: Sequence[CallingPoint]
-    operator_name: Optional[str]
-    train_uid: Optional[str]
-
-
-@dataclass(frozen=True)
-class StationSummary:
-    name: str
-    station_code: str
 
 
 class TransportApiClient:
@@ -70,8 +42,6 @@ class TransportApiClient:
         limit: int = 5,
         when: Optional[dt.datetime] = None,
     ) -> Sequence[Departure]:
-        """Return upcoming departures from origin, optionally filtered by destination."""
-
         params = {
             "app_id": self._settings.app_id,
             "app_key": self._settings.app_key,
@@ -86,32 +56,12 @@ class TransportApiClient:
 
         path = f"/uk/train/station/{origin_crs}/live.json"
         response = await self._client.get(path, params=params)
-        if response.status_code >= 400:
-            raise TransportApiError(
-                f"TransportAPI error {response.status_code}: {response.text}"
-            )
+        payload = await self._json_or_error(response, "requesting departures")
 
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            snippet = response.text[:200] or "<empty body>"
-            content_type = response.headers.get("content-type", "unknown")
-            raise TransportApiError(
-                "TransportAPI returned a non-JSON response when requesting departures "
-                f"(status {response.status_code}, content-type {content_type}): {snippet}"
-            ) from exc
-        try:
-            departures = payload["departures"]["all"]
-        except KeyError as exc:
-            raise TransportApiError(
-                "Unexpected TransportAPI payload structure; 'departures.all' missing"
-            ) from exc
-
-        return [self._parse_departure(item) for item in departures]
+        departures = payload.get("departures", {}).get("all", [])
+        return [self._parse_departure(item) for item in departures][:limit]
 
     async def search_station(self, query: str, *, limit: int = 5) -> Sequence[StationSummary]:
-        """Return best matching stations for a user provided query."""
-
         params = {
             "app_id": self._settings.app_id,
             "app_key": self._settings.app_key,
@@ -119,28 +69,35 @@ class TransportApiClient:
             "type": "train_station",
             "limit": str(limit),
         }
-
         response = await self._client.get("/uk/places.json", params=params)
+        payload = await self._json_or_error(response, "searching for stations")
+
+        members = payload.get("member", [])
+        results: list[StationSummary] = []
+        for item in members:
+            code = item.get("station_code")
+            name = item.get("name")
+            if not code or not name:
+                continue
+            results.append(StationSummary(name=name, station_code=code))
+            if len(results) >= limit:
+                break
+        return results
+
+    async def _json_or_error(self, response: httpx.Response, action: str) -> dict[str, Any]:
         if response.status_code >= 400:
             raise TransportApiError(
-                f"TransportAPI error {response.status_code}: {response.text}"
+                f"TransportAPI error {response.status_code} while {action}: {response.text[:200]}"
             )
-
         try:
-            payload = response.json()
+            return response.json()
         except ValueError as exc:
             snippet = response.text[:200] or "<empty body>"
             content_type = response.headers.get("content-type", "unknown")
             raise TransportApiError(
-                "TransportAPI returned a non-JSON response when searching for stations "
-                f"(status {response.status_code}, content-type {content_type}): {snippet}"
+                "TransportAPI returned a non-JSON response while "
+                f"{action} (status {response.status_code}, content-type {content_type}): {snippet}"
             ) from exc
-        members = payload.get("member", [])
-        return [
-            StationSummary(name=item.get("name", ""), station_code=item.get("station_code", ""))
-            for item in members
-            if item.get("station_code")
-        ]
 
     @staticmethod
     def _parse_departure(data: dict[str, Any]) -> Departure:
@@ -150,40 +107,41 @@ class TransportApiClient:
             CallingPoint(
                 station_name=point.get("station_name", ""),
                 station_code=point.get("station_code", ""),
-                aimed_arrival_time=point.get("aimed_arrival_time"),
+                aimed_arrival_time=point.get("aimed_arrival_time") or point.get("aimed_pass_time"),
                 expected_arrival_time=point.get("expected_arrival_time"),
             )
             for point in calling_points_data
         ]
 
-        destination = data.get("destination_name", "Unknown")
-        if isinstance(destination, list):
-            # Some responses provide list of destinations; take the first.
-            destination_name = destination[0]
-        else:
-            destination_name = destination
-
-        destination_code = ""
-        for point in calling_points:
-            if point.station_name == destination_name:
-                destination_code = point.station_code
-                break
+        destination_name = TransportApiClient._extract_destination_name(data)
+        destination_code = TransportApiClient._find_destination_code(destination_name, calling_points)
 
         return Departure(
-            service=data.get("service", ""),
+            service_uid=data.get("train_uid", ""),
             destination_name=destination_name,
             destination_code=destination_code,
             platform=data.get("platform"),
-            aimed_departure_time=data.get("aimed_departure_time", ""),
-            expected_departure_time=data.get("expected_departure_time", ""),
+            aimed_departure_time=data.get("aimed_departure_time"),
+            expected_departure_time=data.get("expected_departure_time") or data.get("aimed_departure_time"),
             status=data.get("status", ""),
             calling_points=calling_points,
-            operator_name=data.get("operator_name"),
-            train_uid=data.get("train_uid"),
+            operator_name=data.get("operator_name") or data.get("operator"),
         )
 
+    @staticmethod
+    def _extract_destination_name(data: dict[str, Any]) -> str:
+        destination = data.get("destination_name")
+        if isinstance(destination, list):
+            return destination[0]
+        return destination or "Unknown"
 
-async def create_transport_client(settings: TransportApiSettings) -> TransportApiClient:
-    """Factory helper to encapsulate async client creation."""
+    @staticmethod
+    def _find_destination_code(name: str, calling_points: Sequence[CallingPoint]) -> str:
+        for point in calling_points:
+            if point.station_name == name:
+                return point.station_code
+        return ""
 
+
+def create_transport_client(settings: TransportApiSettings) -> TransportApiClient:
     return TransportApiClient(settings)

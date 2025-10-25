@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Sequence
 
-from .transport_api import Departure
+from .models import Departure
 
 
 def format_departures(
@@ -61,9 +61,12 @@ def _format_timing(service: Departure) -> str:
     expected = service.expected_departure_time
     aimed = service.aimed_departure_time
     status = service.status
-    if expected and expected != aimed:
-        return f"Due {aimed} (est. {expected}, {status})"
-    return f"Due {aimed} ({status})"
+    aimed_display = aimed or "TBC"
+    if expected and aimed and expected != aimed:
+        return f"Due {aimed_display} (est. {expected}, {status})"
+    if expected and not aimed:
+        return f"Due {expected} ({status})"
+    return f"Due {aimed_display} ({status})"
 
 
 def _format_calling_points(service: Departure) -> str:

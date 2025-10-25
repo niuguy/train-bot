@@ -1,7 +1,7 @@
 [project]
 name = "train-bot"
 version = "0.1.0"
-description = "Telegram bot that queries UK rail departures via TransportAPI"
+description = "Telegram bot that queries UK rail departures via RealTimeTrains with TransportAPI fallback"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

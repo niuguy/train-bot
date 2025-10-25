@@ -1,16 +1,17 @@
 # Train Schedule Telegram Bot
 
-A Telegram bot that surfaces up-to-date UK rail departure information between two stations using the TransportAPI public service.
+A Telegram bot that surfaces up-to-date UK rail departure information between two stations using the RealTimeTrains public API, with an optional TransportAPI fallback when RTT is unavailable or rate-limited.
 
 ## Features
 - `/journey <origin> to <destination> [at HH:MM]` lists upcoming direct services calling at the destination.
-- `/stations <query>` searches TransportAPI for station codes when you only know part of the name.
+- `/stations <query>` searches the configured rail data providers for station codes when you only know part of the name.
 - Friendly formatting that highlights operator, platform, timing, and notable calling points.
 
 ## Prerequisites
 - Python 3.11 or newer.
 - Telegram Bot API token via [@BotFather](https://core.telegram.org/bots#6-botfather).
-- TransportAPI credentials (app id + app key) from [transportapi.com](https://www.transportapi.com/).
+- RealTimeTrains API account with username/password credentials from [realtimetrains.co.uk](https://www.realtimetrains.co.uk/).
+- (Optional) TransportAPI credentials (app id + app key) from [transportapi.com](https://www.transportapi.com/) to enable fallback.
 
 ## Setup
 ### Using uv (recommended)
@@ -23,10 +24,13 @@ A Telegram bot that surfaces up-to-date UK rail departure information between tw
 3. Provide credentials via environment variables or a `.env` file in the project root:
    ```env
    TELEGRAM_BOT_TOKEN=123456:abc...
-   TRANSPORT_API_APP_ID=your-app-id
-   TRANSPORT_API_APP_KEY=your-app-key
+   RTT_USERNAME=your-rtt-username
+   RTT_PASSWORD=your-rtt-password
+   TRANSPORT_API_APP_ID=optional-app-id
+   TRANSPORT_API_APP_KEY=optional-app-key
    # Optional: override defaults
    # DEFAULT_RESULT_LIMIT=5
+   # RTT_BASE_URL=https://api.rtt.io
    # TRANSPORT_API_BASE_URL=https://transportapi.com/v3
    ```
 
@@ -65,10 +69,12 @@ python -m train_bot
 
 ### k3s / ArgoCD Manifests
 - `k8s/train-bot/deployment.yaml` defines a single replica worker that pulls the `ghcr.io/niuguy/train-bot:latest` image and injects secrets via `train-bot-secrets`.
-- `k8s/train-bot/secret-example.yaml` shows the expected keys—create the real secret out-of-band:
+- `k8s/train-bot/secret-example.yaml` shows the expected keys—create the real secret out-of-band (omit the TransportAPI keys if you are not using that fallback):
   ```bash
   kubectl create secret generic train-bot-secrets \
     --from-literal=TELEGRAM_BOT_TOKEN=... \
+    --from-literal=RTT_USERNAME=... \
+    --from-literal=RTT_PASSWORD=... \
     --from-literal=TRANSPORT_API_APP_ID=... \
     --from-literal=TRANSPORT_API_APP_KEY=...
   ```
@@ -78,7 +84,6 @@ Point an ArgoCD Application at `k8s/train-bot` and set the image tag via Kustomi
 
 ### GitHub Actions Build (GHCR)
 This repository includes `.github/workflows/publish.yml`, which builds a multi-arch image (`linux/amd64`, `linux/arm64`) and pushes it to `ghcr.io/niuguy/train-bot:latest` on each push to `main` (and on tagged releases). Make sure the repository has GitHub Packages enabled and that the workflow user has permission to push to GHCR (default `GITHUB_TOKEN` works for public repositories).
-The bot will run in polling mode and respond to incoming Telegram messages.
 
 ## Command Reference
 - `/start` – get a quick primer.
@@ -87,7 +92,7 @@ The bot will run in polling mode and respond to incoming Telegram messages.
 - `/stations Paddington` – list matching stations with CRS codes when you are unsure of the spelling.
 
 ## Notes & Limitations
-- TransportAPI free tier requests are rate limited; consider caching or back-off if you expect higher usage.
+- RealTimeTrains and TransportAPI apply fair-use limits; consider caching or back-off if you expect higher usage.
 - Times are treated as local UK times without daylight-saving adjustments.
 - The bot filters by destination using the `calling_at` parameter; it does not currently offer interchange planning or multi-leg journey results.
 

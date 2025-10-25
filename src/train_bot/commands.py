@@ -5,17 +5,13 @@ import re
 from dataclasses import dataclass
 from typing import Sequence
 
-import httpx
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from .config import BotSettings
 from .formatter import format_departures
-from .transport_api import (
-    StationSummary,
-    TransportApiClient,
-    TransportApiError,
-)
+from .models import StationSummary
+from .providers import AllProvidersFailed, RailProvider, call_with_fallback
 
 
 @dataclass(frozen=True)
@@ -57,14 +53,15 @@ async def stations(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Please supply a station name, e.g. /stations York")
         return
 
-    client = _transport_client(context)
+    providers = _providers(context)
     try:
-        results = await client.search_station(query)
-    except TransportApiError as exc:
-        await update.message.reply_text(f"Transport API error: {exc}")
-        return
-    except httpx.HTTPError as exc:
-        await update.message.reply_text(f"Network error talking to TransportAPI: {exc}")
+        results, provider_name, errors = await call_with_fallback(
+            providers, "search_station", query, limit=5, retry_on_empty=True
+        )
+    except AllProvidersFailed as exc:
+        await update.message.reply_text(
+            "All data providers failed while searching for stations:\n" + "\n".join(exc.messages)
+        )
         return
 
     if not results:
@@ -72,7 +69,10 @@ async def stations(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     lines = [f"{station.name} — {station.station_code}" for station in results]
-    await update.message.reply_text("Station matches:\n" + "\n".join(lines))
+    header = f"Station matches (via {provider_name})" if provider_name else "Station matches"
+    if errors:
+        header += "\n" + "\n".join(f"Fallback note: {err}" for err in errors)
+    await update.message.reply_text(f"{header}:\n" + "\n".join(lines))
 
 
 async def journey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -92,16 +92,27 @@ async def journey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     settings = _settings(context)
-    client = _transport_client(context)
+    providers = _providers(context)
 
     try:
-        origin_candidates = await client.search_station(request.origin_query, limit=3)
-        destination_candidates = await client.search_station(request.destination_query, limit=3)
-    except TransportApiError as exc:
-        await update.message.reply_text(f"Transport API error: {exc}")
-        return
-    except httpx.HTTPError as exc:
-        await update.message.reply_text(f"Network error talking to TransportAPI: {exc}")
+        origin_candidates, origin_provider, origin_errors = await call_with_fallback(
+            providers,
+            "search_station",
+            request.origin_query,
+            limit=3,
+            retry_on_empty=True,
+        )
+        destination_candidates, destination_provider, destination_errors = await call_with_fallback(
+            providers,
+            "search_station",
+            request.destination_query,
+            limit=3,
+            retry_on_empty=True,
+        )
+    except AllProvidersFailed as exc:
+        await update.message.reply_text(
+            "All data providers failed while resolving stations:\n" + "\n".join(exc.messages)
+        )
         return
 
     if not origin_candidates:
@@ -115,17 +126,19 @@ async def journey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     destination = destination_candidates[0]
 
     try:
-        departures = await client.get_departures(
+        departures, departure_provider, departure_errors = await call_with_fallback(
+            providers,
+            "get_departures",
             origin.station_code,
             destination_crs=destination.station_code,
             limit=settings.default_station_filter_limit,
             when=request.when,
+            retry_on_empty=True,
         )
-    except TransportApiError as exc:
-        await update.message.reply_text(f"Transport API error: {exc}")
-        return
-    except httpx.HTTPError as exc:
-        await update.message.reply_text(f"Network error talking to TransportAPI: {exc}")
+    except AllProvidersFailed as exc:
+        await update.message.reply_text(
+            "All data providers failed while fetching departures:\n" + "\n".join(exc.messages)
+        )
         return
 
     origin_name = _tidy_station_name(origin.name)
@@ -139,7 +152,24 @@ async def journey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     suffix = _format_alternatives(origin_candidates, destination_candidates)
-    await update.message.reply_text(message + suffix)
+
+    diagnostics: list[str] = []
+    if origin_errors:
+        diagnostics.extend(f"Origin fallback: {err}" for err in origin_errors)
+    if destination_errors:
+        diagnostics.extend(f"Destination fallback: {err}" for err in destination_errors)
+    if departure_errors:
+        diagnostics.extend(f"Departure fallback: {err}" for err in departure_errors)
+
+    provider_note = (
+        f"\n\nData source: {departure_provider or origin_provider or destination_provider}"
+        if (departure_provider or origin_provider or destination_provider)
+        else ""
+    )
+
+    diagnostic_note = ("\n" + "\n".join(diagnostics)) if diagnostics else ""
+
+    await update.message.reply_text(message + suffix + provider_note + diagnostic_note)
 
 
 def parse_journey_query(text: str) -> JourneyRequest:
@@ -178,8 +208,8 @@ def _settings(context: ContextTypes.DEFAULT_TYPE) -> BotSettings:
     return context.application.bot_data["settings"]
 
 
-def _transport_client(context: ContextTypes.DEFAULT_TYPE) -> TransportApiClient:
-    return context.application.bot_data["transport_client"]
+def _providers(context: ContextTypes.DEFAULT_TYPE) -> Sequence[RailProvider]:
+    return context.application.bot_data["rail_providers"]
 
 
 def _format_alternatives(

@@ -1,4 +1,4 @@
-"""Telegram bot for querying UK train schedules using TransportAPI."""
+"""Telegram bot for querying UK train schedules using RealTimeTrains with TransportAPI fallback."""
 
 __all__ = [
     "__version__",
