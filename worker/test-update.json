@@ -1,0 +1,9 @@
+{
+  "update_id": 1,
+  "message": {
+    "message_id": 1,
+    "date": 1720000000,
+    "chat": { "id": 123456789, "type": "private" },
+    "text": "/journey Woking to London Waterloo"
+  }
+}

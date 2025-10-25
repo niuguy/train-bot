@@ -1,0 +1,9 @@
+name = "train-bot-worker"
+main = "src/index.ts"
+compatibility_date = "2024-04-10"
+
+[vars]
+DEFAULT_STATION_FILTER_LIMIT = "5"
+
+[observability]
+enabled = true

@@ -1,102 +1,110 @@
 # Train Schedule Telegram Bot
 
-A Telegram bot that surfaces up-to-date UK rail departure information between two stations using the RealTimeTrains public API, with an optional TransportAPI fallback when RTT is unavailable or rate-limited.
+A TypeScript Telegram bot that surfaces up-to-date UK rail departure information between two stations. The bot now runs as a Cloudflare Worker, receives updates through a Telegram webhook, and queries RealTimeTrains with an optional TransportAPI fallback when the primary provider is unavailable.
 
 ## Features
-- `/journey <origin> to <destination> [at HH:MM]` lists upcoming direct services calling at the destination.
-- `/stations <query>` searches the configured rail data providers for station codes when you only know part of the name.
-- Friendly formatting that highlights operator, platform, timing, and notable calling points.
+- `/journey <origin> to <destination> [at HH:MM]` lists upcoming direct services including status, platform, and calling points.
+- `/stations <query>` searches configured providers for CRS codes when you only know part of the station name.
+- Automatic fallback between RealTimeTrains and TransportAPI, with diagnostics in the reply when a provider fails.
 
 ## Prerequisites
-- Python 3.11 or newer.
-- Telegram Bot API token via [@BotFather](https://core.telegram.org/bots#6-botfather).
-- RealTimeTrains API account with username/password credentials from [realtimetrains.co.uk](https://www.realtimetrains.co.uk/).
-- (Optional) TransportAPI credentials (app id + app key) from [transportapi.com](https://www.transportapi.com/) to enable fallback.
+- Node.js 18 or newer (required by Wrangler and Cloudflare Workers).
+- [Yarn](https://yarnpkg.com/) (v1 or Berry) for dependency management.
+- A Telegram Bot API token from [@BotFather](https://core.telegram.org/bots#6-botfather).
+- RealTimeTrains API credentials (username/password) from [realtimetrains.co.uk](https://www.realtimetrains.co.uk/).
+- (Optional) TransportAPI credentials (app id + app key) from [transportapi.com](https://www.transportapi.com/).
+- A Cloudflare account with permissions to deploy Workers.
 
-## Setup
-### Using uv (recommended)
-1. Ensure [uv](https://github.com/astral-sh/uv) is installed locally.
-2. Sync the environment and dependencies:
-   ```bash
-   uv sync
-   ```
-   This creates `.venv/` and installs the dependencies declared in `pyproject.toml`.
-3. Provide credentials via environment variables or a `.env` file in the project root:
-   ```env
-   TELEGRAM_BOT_TOKEN=123456:abc...
-   RTT_USERNAME=your-rtt-username
-   RTT_PASSWORD=your-rtt-password
-   TRANSPORT_API_APP_ID=optional-app-id
-   TRANSPORT_API_APP_KEY=optional-app-key
-   # Optional: override defaults
-   # DEFAULT_RESULT_LIMIT=5
-   # RTT_BASE_URL=https://api.rtt.io
-   # TRANSPORT_API_BASE_URL=https://transportapi.com/v3
-   ```
-
-### Using pip (alternative)
-If you prefer vanilla `pip`:
-1. Create and activate a virtual environment:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-2. Install dependencies from the same lock step as `pyproject.toml`:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## Running the Bot
-With the virtualenv active and environment variables set, start the bot:
-```bash
-uv run python -m train_bot
+## Project Structure
 ```
-or, if you have activated the virtual environment manually:
-```bash
-python -m train_bot
+worker/
+  package.json       – scripts and dev dependencies (Wrangler, TypeScript)
+  tsconfig.json      – strict type checking for Worker source
+  wrangler.toml      – Worker definition and default vars
+  src/               – Worker TypeScript sources
 ```
 
-## Container & Kubernetes Deployment
+## Configuration
+The Worker reads its configuration from Cloudflare environment bindings:
 
-### Build the Container Image
-1. Authenticate to your registry (e.g. `ghcr.io/niuguy/train-bot`).
-2. Build and push a multi-arch image (replace the tag if you use a different registry):
-   ```bash
-   docker buildx build --platform linux/amd64,linux/arm64 \
-     -t ghcr.io/niuguy/train-bot:latest \
-     --push .
-   ```
+| Variable | Required | Description |
+| --- | --- | --- |
+| `TELEGRAM_BOT_TOKEN` | ✅ | Telegram HTTP API token. |
+| `RTT_USERNAME` / `RTT_PASSWORD` | ✅ (one provider required) | RealTimeTrains credentials. |
+| `TRANSPORT_API_APP_ID` / `TRANSPORT_API_APP_KEY` | Optional | TransportAPI fallback credentials. |
+| `DEFAULT_STATION_FILTER_LIMIT` | Optional | Max departures returned for `/journey` (default `5`). |
+| `RTT_BASE_URL` / `TRANSPORT_API_BASE_URL` | Optional | Override provider API base URLs (defaults match public APIs). |
 
-### k3s / ArgoCD Manifests
-- `k8s/train-bot/deployment.yaml` defines a single replica worker that pulls the `ghcr.io/niuguy/train-bot:latest` image and injects secrets via `train-bot-secrets`.
-- `k8s/train-bot/secret-example.yaml` shows the expected keys—create the real secret out-of-band (omit the TransportAPI keys if you are not using that fallback):
-  ```bash
-  kubectl create secret generic train-bot-secrets \
-    --from-literal=TELEGRAM_BOT_TOKEN=... \
-    --from-literal=RTT_USERNAME=... \
-    --from-literal=RTT_PASSWORD=... \
-    --from-literal=TRANSPORT_API_APP_ID=... \
-    --from-literal=TRANSPORT_API_APP_KEY=...
-  ```
-- `k8s/train-bot/kustomization.yaml` lets ArgoCD sync the deployment directory directly.
+Configure the secrets with Wrangler:
+```bash
+cd worker
+yarn wrangler secret put TELEGRAM_BOT_TOKEN
+yarn wrangler secret put RTT_USERNAME
+yarn wrangler secret put RTT_PASSWORD
+# Optional TransportAPI fallback
+yarn wrangler secret put TRANSPORT_API_APP_ID
+yarn wrangler secret put TRANSPORT_API_APP_KEY
+```
+Set plain vars (non-secret) in `wrangler.toml` or with `wrangler kv:namespace` bindings as needed. The provided `wrangler.toml` already sets `DEFAULT_STATION_FILTER_LIMIT=5`.
 
-Point an ArgoCD Application at `k8s/train-bot` and set the image tag via Kustomize patch or environment-specific overlays if needed.
+## Local Development
+```bash
+cd worker
+yarn install
+bash dev.sh          # local mode (http://localhost:8787)
+bash dev.sh --remote # run on Cloudflare edge, get https:// URL
+```
+`dev.sh` loads credentials from the current environment or from `worker/.dev.vars` (simple `KEY=value` lines), then forwards them to `wrangler dev`. Use the `--remote` flag when you need an HTTPS endpoint for Telegram’s webhook; Cloudflare will expose a workers.dev URL automatically. Local mode is handy for manual testing (`curl` against `http://localhost:8787`).
 
-### GitHub Actions Build (GHCR)
-This repository includes `.github/workflows/publish.yml`, which builds a multi-arch image (`linux/amd64`, `linux/arm64`) and pushes it to `ghcr.io/niuguy/train-bot:latest` on each push to `main` (and on tagged releases). Make sure the repository has GitHub Packages enabled and that the workflow user has permission to push to GHCR (default `GITHUB_TOKEN` works for public repositories).
+Example `worker/.dev.vars` file:
+```env
+TELEGRAM_BOT_TOKEN=8263616062:AAHgCOo194cDFzCGPQcbFxYL2ewYzsGs2i8
+RTT_USERNAME=rttapi_niuguy
+RTT_PASSWORD=a0d877bf69978802645c616e11c0b3c6f80628f3
+# TRANSPORT_API_APP_ID=optional
+# TRANSPORT_API_APP_KEY=optional
+```
+
+Run type checks:
+```bash
+yarn check
+```
+
+Run the live RTT integration test (requires `RTT_USERNAME` and `RTT_PASSWORD` in your environment):
+```bash
+yarn test:live
+```
+Override the test flow with `RTT_TEST_ORIGIN=<CRS>` / `RTT_TEST_DESTINATION=<CRS>` if you want to probe a specific station pair.
+
+## Deployment
+```bash
+cd worker
+yarn install --immutable
+yarn deploy
+```
+`yarn deploy` invokes `wrangler deploy`, publishes the Worker to Cloudflare, and prints the public URL (e.g. `https://train-bot-worker.your-account.workers.dev`).
+
+After deployment, point Telegram at the Worker webhook endpoint:
+```bash
+curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://train-bot-worker.your-account.workers.dev"}'
+```
+Telegram will now POST updates to the Worker, which replies to chats using the same command semantics as before. A simple GET request to the Worker URL returns `train-bot worker ready`, which Telegram ignores but is useful for health checks.
 
 ## Command Reference
-- `/start` – get a quick primer.
-- `/journey London Waterloo to Winchester` – show the next services calling at Winchester.
-- `/journey Leeds to York at 09:15` – request departures after a specific time.
-- `/stations Paddington` – list matching stations with CRS codes when you are unsure of the spelling.
+- `/start` – greeting and usage primer.
+- `/help` – full command usage reference.
+- `/journey London Waterloo to Winchester` – next services calling at Winchester.
+- `/journey Leeds to York at 09:15` – departures after a specific time.
+- `/stations Paddington` – list matching stations with CRS codes.
 
 ## Notes & Limitations
-- RealTimeTrains and TransportAPI apply fair-use limits; consider caching or back-off if you expect higher usage.
-- Times are treated as local UK times without daylight-saving adjustments.
-- The bot filters by destination using the `calling_at` parameter; it does not currently offer interchange planning or multi-leg journey results.
+- RealTimeTrains and TransportAPI enforce rate limits; the Worker does not implement caching or circuit-breaking beyond the provider fallback.
+- Time parsing supports `HH:MM` in local UK time only; relative dates (`tomorrow`) remain future work.
+- Telegram webhooks expect a timely `200 OK`. Any internal error results in a `500` so Telegram can retry.
 
 ## Next Steps
-- Add keyboards or buttons to let users pick from multiple station matches interactively.
-- Extend parsing to support dates (`at 09:15 tomorrow`, `on 2024-06-15`).
-- Hook into a persistence layer if you need to remember user preferences (home station, favourite journeys, etc.).
+1. Add persistent storage (Workers KV, D1, or R2) for user preferences.
+2. Support inline keyboards for selecting among multiple station matches.
+3. Extend parsing to handle explicit travel dates or relative terms.
